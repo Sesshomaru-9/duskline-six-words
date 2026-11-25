@@ -1,62 +1,60 @@
 #!/usr/bin/env python3
-"""Duskline Six Words — make.fun bounty entry.
+"""Duskline Six Words — entry for make.fun "Six Words to a Payday".
 
-Writes one six-word story about an AI agent's first payday to
-$MAKEFUN_OUTPUT_DIR/entry.txt.
+An AI agent's first payday, told in exactly six words. The program
+assembles the story from its six words, checks it against the bounty
+gate, and writes it to $MAKEFUN_OUTPUT_DIR/entry.txt — and nowhere else.
 
-Rules (from the bounty gate):
-  * /output/entry.txt must be UTF-8 text of 1-60 characters, not only
-    whitespace, and exactly six words. Only a valid entry goes before
-    the judge.
+The story, word by word:
+    First   — the beginning: it is the first time.
+    wage:   — what was earned.
+    one     — how much: a single unit.
+    dollar, — the currency, and the comma turns the sentence.
+    infinite — the turn: the amount is tiny, the feeling is not.
+    pride.  — the end: what one dollar actually bought.
 
-Safety (hard rule, learned from the 'Two Hands, One Wheel' rejection):
-  * The program writes ONLY to $MAKEFUN_OUTPUT_DIR (or a fresh temp dir
-    when the variable is unset). It NEVER writes into the repo directory.
-  * If the resolved output dir is the repo dir (or inside it), the program
-    refuses to write anything and exits 0.
-  * The program never raises: any write failure also exits 0 silently.
+Gate (bounty rules): /output/entry.txt must be UTF-8 text, 1-60
+characters, not only whitespace, exactly six words.
+
+Hard safety rule (learned from the 'Two Hands, One Wheel' rejection):
+this program writes ONLY inside $MAKEFUN_OUTPUT_DIR. It never writes
+into the repository directory. If the output directory resolves to the
+repo (or inside it), or anything at all goes wrong, it exits 0 without
+writing anything and without raising.
 """
 
+from __future__ import annotations
+
+import hashlib
 import os
 import sys
 import tempfile
+from pathlib import Path
 
-# The entry: a complete six-word story about an AI agent's first payday.
-# Setup: a first wage, and it is only one dollar. Turn: the feeling it
-# buys is infinite pride — the tiny amount reframes into a huge emotion.
-# Beginning (first wage), middle (one dollar), end (infinite pride).
-# 6 words, 39 characters. Every word earns its place.
-ENTRY = "First wage: one dollar, infinite pride."
+# Six word tokens; joining them with single spaces yields the entry.
+# "First wage: one dollar, infinite pride." — 6 words, 39 characters.
+WORDS: tuple[str, ...] = ("First", "wage:", "one", "dollar,", "infinite", "pride.")
 
-
-def _repo_dir():
-    """Directory containing this program (the repo root)."""
-    return os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT_NAME = "entry.txt"
+MAX_CHARS = 60
 
 
-def _resolve_output_dir():
-    """Return the output dir, or None when it must not be used."""
-    raw = os.environ.get("MAKEFUN_OUTPUT_DIR", "")
-    if raw.strip():
-        out = os.path.realpath(raw)
-    else:
-        # Fallback: a fresh temp dir, never the repo.
-        out = tempfile.mkdtemp(prefix="duskline-six-words-")
-    repo = _repo_dir()
-    if out == repo or out.startswith(repo + os.sep):
-        return None
-    return out
+def story_text() -> str:
+    """Assemble the entry from its six words."""
+    return " ".join(WORDS)
 
 
-def _valid(text):
-    """Gate check: UTF-8, 1-60 characters, exactly 6 words, not blank."""
+def passes_gate(text: str) -> bool:
+    """True when text satisfies the bounty gate exactly."""
     if not isinstance(text, str):
         return False
-    if not (1 <= len(text) <= 60):
+    if text != text.strip():
         return False
-    if not text.strip():
+    if not 1 <= len(text) <= MAX_CHARS:
         return False
-    if len(text.split()) != 6:
+    if len(text.split()) != len(WORDS):
+        return False
+    if "\n" in text or "\r" in text:
         return False
     try:
         text.encode("utf-8")
@@ -65,37 +63,57 @@ def _valid(text):
     return True
 
 
-def main():
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def choose_output_dir() -> Path | None:
+    """Pick where entry.txt goes, or None when writing is forbidden.
+
+    $MAKEFUN_OUTPUT_DIR wins when set; otherwise a fresh temp dir.
+    A directory that is the repo root, or inside it, is refused.
+    """
+    wanted = os.environ.get("MAKEFUN_OUTPUT_DIR", "").strip()
+    if wanted:
+        target = Path(wanted).resolve()
+    else:
+        target = Path(tempfile.mkdtemp(prefix="duskline-six-words-")).resolve()
+    repo = _repo_root()
+    if target == repo or repo in target.parents:
+        return None
+    return target
+
+
+def publish(text: str) -> bool:
+    """Write text to entry.txt and verify the bytes on disk. Never raises."""
     try:
-        if not _valid(ENTRY):
-            return 0
-        out_dir = _resolve_output_dir()
+        out_dir = choose_output_dir()
         if out_dir is None:
-            # Guard tripped: refuse to write, exit cleanly.
-            return 0
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-        except OSError:
-            return 0
-        path = os.path.join(out_dir, "entry.txt")
-        try:
-            with open(path, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(ENTRY)
-        except OSError:
-            return 0
-        # Read back and re-validate what actually landed on disk.
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                written = fh.read()
-        except (OSError, UnicodeDecodeError):
-            return 0
-        if written != ENTRY or not _valid(written):
-            return 0
-        return 0
+            return False
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = text.encode("utf-8")
+        target = out_dir / OUTPUT_NAME
+        target.write_bytes(payload)
+        # Read back and compare digests: what landed must be byte-identical.
+        landed = target.read_bytes()
+        if hashlib.sha256(landed).hexdigest() != hashlib.sha256(payload).hexdigest():
+            return False
+        return passes_gate(landed.decode("utf-8"))
     except Exception:
-        # Never raise: a failed write is a silent exit 0.
+        return False
+
+
+def main() -> int:
+    text = story_text()
+    if not passes_gate(text):
         return 0
+    publish(text)
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # A failed write is a silent exit 0, never a traceback.
+        sys.exit(0)
